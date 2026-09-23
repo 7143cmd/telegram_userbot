@@ -11,6 +11,8 @@
     "work": "обсуждение работы",
     "friends": "неформальное общение с друзьями"
   },
-
+  
+  "min_random_cooldown": 5,
+  "max_random_cooldown": 10,
   "cooldown_seconds": 3
 }

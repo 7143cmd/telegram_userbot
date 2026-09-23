@@ -1,6 +1,8 @@
 import json
+import asyncio
 import re
 import time
+import random
 from pathlib import Path
 from telethon import TelegramClient, events, utils
 from llm import ask_llm
@@ -93,6 +95,8 @@ async def main():
     trigger_name = config["name"]
     session_name = config.get("session_name", "userbot_session")
     groups_config = config["groups"]
+    min_cooldown = int(config.get("min_random_cooldown", 0))
+    max_cooldown = int(config.get("max_random_cooldown", 0))
     cooldown = float(config.get("cooldown_seconds", 0))
 
     trigger_re = build_trigger_regex(trigger_name)
@@ -130,7 +134,12 @@ async def main():
 
         group_prompt = group_info["prompt"]
         try:
-            reply_text = await ask_llm(text, group_prompt)
+            random_kd = random.randint(min_cooldown, max_cooldown)
+            print(random_kd)
+            reply_text, _ = await asyncio.gather(
+                ask_llm(text, group_prompt),
+                asyncio.sleep(random_kd)
+            )
         except Exception as e:
             print(f"[ERROR] Не удалось сгенерировать ответ: {e}")
             return
