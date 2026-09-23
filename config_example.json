@@ -1,0 +1,16 @@
+{
+  "id": 0000,
+  "hash": "YOUR_HASH_HERE",
+  "name": "YOUR_NAME",
+
+  "session_name": "userbot_session",
+  "group": "work",
+
+  "responses": [
+    "Вариант ответа 1",
+    "Вариант ответа 2",
+    "Вариант ответа 3"
+  ],
+
+  "cooldown_seconds": 3
+}
