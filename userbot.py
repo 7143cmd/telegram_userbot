@@ -134,17 +134,26 @@ async def main():
 
         group_prompt = group_info["prompt"]
         try:
-            random_kd = random.randint(min_cooldown, max_cooldown)
-            print(random_kd)
+
             reply_text, _ = await asyncio.gather(
                 ask_llm(text, group_prompt),
-                asyncio.sleep(random_kd)
+                asyncio.sleep(random.randint(min_cooldown, max_cooldown))
             )
         except Exception as e:
             print(f"[ERROR] Не удалось сгенерировать ответ: {e}")
             return
 
         try:
+            llm_task = asyncio.create_task(ask_llm(text, group_prompt))
+
+            await asyncio.sleep(random.uniform(min_cooldown, max_cooldown))
+
+            async with client.action(event.chat_id, 'typing'):      #type: ignore
+                reply_text = await llm_task
+
+                typing_time = min(max(len(reply_text) * 0.05, 1.5), 10)
+                await asyncio.sleep(typing_time)
+
             await event.reply(reply_text)
             last_reply_ts[event.chat_id] = now
             print(f"[REPLY] [{group_info['title']}] -> {text!r} :: {reply_text!r}")
