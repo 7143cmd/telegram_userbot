@@ -2,3 +2,5 @@ venv
 userbot_session.session
 userbot_session.session-journal
 config.json
+.env
+__pycache__
