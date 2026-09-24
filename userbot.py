@@ -1,11 +1,13 @@
-import json
 import asyncio
-import re
-import time
+import json
 import random
+import time
+from difflib import SequenceMatcher
 from pathlib import Path
+
 from telethon import TelegramClient, events, utils
-from llm import ask_llm
+
+from llm import ask_llm, detect_addressee
 
 CONFIG_PATH = Path(__file__).with_name("config.json")
 
@@ -13,12 +15,6 @@ CONFIG_PATH = Path(__file__).with_name("config.json")
 def load_config() -> dict:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def build_trigger_regex(name: str) -> re.Pattern:
-    escaped = re.escape(name)
-    pattern = rf"(?<![\wа-яА-ЯёЁ@])@?{escaped}(?![\wа-яА-ЯёЁ])"
-    return re.compile(pattern, flags=re.IGNORECASE | re.UNICODE)
 
 
 def _candidate_ids(raw_id: int):
@@ -70,9 +66,10 @@ async def resolve_group(client: TelegramClient, dialogs, group_ref):
         f"'{d.name}' (id={utils.get_peer_id(d.entity)})" for d in dialogs if d.is_group
     ]
     raise RuntimeError(
-        f"""Не удалось найти группу '{group_ref}'.
-        Доступные группы этого аккаунта: {available_groups or 'нет ни одной группы'}"""
+        f"Не удалось найти группу '{group_ref}'.\n"
+        f"Доступные группы этого аккаунта: {available_groups or 'нет ни одной группы'}"
     )
+
 
 async def resolve_all_groups(client: TelegramClient, groups_config: dict):
     dialogs = [d async for d in client.iter_dialogs()]
@@ -87,6 +84,13 @@ async def resolve_all_groups(client: TelegramClient, groups_config: dict):
     return group_map
 
 
+def _names_match(detected: str, trigger_name: str) -> bool:
+    a, b = detected.strip().lower(), trigger_name.strip().lower()
+    if a == b:
+        return True
+    return SequenceMatcher(None, a, b).ratio() >= 0.8
+
+
 async def main():
     config = load_config()
 
@@ -99,19 +103,25 @@ async def main():
     max_cooldown = int(config.get("max_random_cooldown", 0))
     cooldown = float(config.get("cooldown_seconds", 0))
 
-    trigger_re = build_trigger_regex(trigger_name)
-
     client = TelegramClient(session_name, api_id, api_hash)
 
-    await client.start()        #type: ignore
+    await client.start()  # type: ignore
+
+    me = await client.get_me()
 
     group_map = await resolve_all_groups(client, groups_config)
 
-    print(f"[OK] Реагирую на упоминания: '{trigger_name}'")
+    print(f"[OK] Имя бота: '{trigger_name}' (me.id={me.id})")
     for chat_id, info in group_map.items():
         print(f"[OK] Слушаю группу: {info['title']} (id={chat_id}) :: prompt='{info['prompt']}'")
 
     last_reply_ts: dict[int, float] = {}
+
+    async def maybe_sleep_like_typing():
+        if max_cooldown <= 0:
+            return
+        delay = random.randint(min_cooldown, max_cooldown)
+        await asyncio.sleep(delay)
 
     @client.on(events.NewMessage())
     async def handler(event):
@@ -124,24 +134,37 @@ async def main():
         text = event.raw_text or ""
         print(f"[DEBUG] [{group_info['title']}] сообщение: {text!r}")
 
-        if not trigger_re.search(text):
-            return
-
         now = time.time()
         last_ts = last_reply_ts.get(event.chat_id, 0.0)
         if cooldown and (now - last_ts) < cooldown:
             return
 
         group_prompt = group_info["prompt"]
-        try:
 
-            reply_text, _ = await asyncio.gather(
-                ask_llm(text, group_prompt),
-                asyncio.sleep(random.randint(min_cooldown, max_cooldown))
-            )
-        except Exception as e:
-            print(f"[ERROR] Не удалось сгенерировать ответ: {e}")
-            return
+        is_reply_to_me = False
+        if event.is_reply:
+            replied = await event.get_reply_message()
+            is_reply_to_me = bool(replied and replied.sender_id == me.id)
+
+        should_reply_as_mention = False
+        should_respond_as_plain_text = False
+
+        if is_reply_to_me:
+            should_reply_as_mention = True
+        else:
+            try:
+                addressee = await detect_addressee(text)
+            except Exception as e:
+                print(f"[ERROR] detect_addressee: {e}")
+                return
+
+            if addressee is None:
+                should_respond_as_plain_text = True
+            elif _names_match(addressee, trigger_name):
+                should_reply_as_mention = True
+            else:
+                print(f"[DEBUG] сообщение адресовано '{addressee}', не боту — игнор")
+                return
 
         try:
             llm_task = asyncio.create_task(ask_llm(text, group_prompt))
@@ -153,18 +176,22 @@ async def main():
 
                 typing_time = min(max(len(reply_text) * 0.05, 1.5), 10)
                 await asyncio.sleep(typing_time)
+            if should_reply_as_mention:
+                await event.reply(reply_text)
+                kind = "REPLY"
+            else:
+                assert should_respond_as_plain_text
+                await event.respond(reply_text)
+                kind = "TEXT"
 
-            await event.reply(reply_text)
             last_reply_ts[event.chat_id] = now
-            print(f"[REPLY] [{group_info['title']}] -> {text!r} :: {reply_text!r}")
+            print(f"[{kind}] [{group_info['title']}] -> {text!r} :: {reply_text!r}")
         except Exception as e:
             print(f"[ERROR] Не удалось ответить: {e}")
 
     print("[OK] Бот запущен и слушает сообщения. Ctrl+C для остановки.")
-    await client.run_until_disconnected()       #type: ignore
+    await client.run_until_disconnected()  # type: ignore
 
 
 if __name__ == "__main__":
-    import asyncio
-
     asyncio.run(main())
