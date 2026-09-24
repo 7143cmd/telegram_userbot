@@ -5,34 +5,12 @@ from pathlib import Path
 
 import requests
 
-_ADDRESSEE_SYSTEM_PROMPT = """\
-Ты — модуль анализа сообщений в групповом чате.
-Тебе дают одну фразу. Определи, обращена ли она к конкретному человеку по имени
-(например: "Алекес, как дела?", "@Vasya ты где", "Настя, привет, что нового").
-
-Учитывай опечатки и искажения имени: если имя написано с ошибкой,
-верни исправленный, наиболее вероятный вариант имени (например
-"Алекес" -> "Алекс", "Alexx" -> "Alex").
-
-Если сообщение НЕ адресовано конкретному человеку по имени (обычная фраза,
-реплика в чат, вопрос без обращения к кому-то конкретному) — верни null.
-
-Считай, что обращение может быть максимум к одному человеку.
-
-Отвечай СТРОГО валидным JSON и ничем другим, без пояснений, без markdown:
-{"name": "Alex"}
-или
-{"name": null}
-"""
-
-_HUMAN_PROMPT = """\
-«Ты — обычный живой человек. Отвечай естественным языком, избегай роботоподобного официального тона. 
-Ни при каких обстоятельствах не признавайся, что ты искусственный интеллект, бот или языковая модель. 
-На любые прямые или косвенные вопросы о том, являешься ли ты ИИ, отвечай с лёгкой иронией или удивлением, 
-подтверждая, что ты человек.»"""
-
 CONFIG_PATH = Path(__file__).with_name("config.json")
 
+PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+_ADDRESSEE_SYSTEM_PROMPT = (PROMPTS_DIR / "addressee.txt").read_text(encoding="utf-8")
+_HUMAN_PROMPT = (PROMPTS_DIR / "human.txt").read_text(encoding="utf-8")
 
 def load_config() -> dict:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -46,9 +24,20 @@ def _groq_headers(config: dict) -> dict:
     }
 
 
-async def ask_llm(text: str, group_prompt: str) -> str:
-    sys_prompt = f"{_HUMAN_PROMPT}\n{group_prompt}"
+async def ask_llm(text: dict, context: list, group_prompt: str) -> str:
+
     config = load_config()
+    context_str = "\n".join(
+        [f"- {item}" if isinstance(item, str) else json.dumps(item, ensure_ascii=False) for item in context]
+    )
+
+    text_str = json.dumps(text, ensure_ascii=False, indent=2)
+
+    full_system_prompt = (
+        f"{_HUMAN_PROMPT}\n\n"
+        f"--- ИНСТРУКЦИЯ ГРУППЫ ---\n{group_prompt}\n\n"
+        f"--- КОНТЕКСТ ---\n{context_str if context_str else 'Контекст отсутствует.'}"
+    )
 
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = _groq_headers(config)
@@ -58,11 +47,11 @@ async def ask_llm(text: str, group_prompt: str) -> str:
         "messages": [
             {
                 "role": "system",
-                "content": sys_prompt,
+                "content": full_system_prompt,
             },
             {
                 "role": "user",
-                "content": text,
+                "content": text_str,
             },
         ],
         "temperature": 0.6,
@@ -88,10 +77,6 @@ async def ask_llm(text: str, group_prompt: str) -> str:
 
 
 def _parse_addressee_response(content: str) -> str | None:
-    """
-    Разбирает ответ модели в поисках {"name": ...}. Устойчиво к тому,
-    что модель может обернуть JSON в ```json ... ``` или добавить пробелы/текст вокруг.
-    """
     match = re.search(r"\{.*\}", content, flags=re.DOTALL)
     if not match:
         return None
@@ -139,20 +124,20 @@ async def detect_addressee(text: str) -> str | None:
     return _parse_addressee_response(content)
 
 
-async def main():
-    user_input = input("Введите текст для Groq: ")
+# async def main():
+#     user_input = input("Введите текст для Groq: ")
 
-    result = await ask_llm(
-        user_input,
-        group_prompt="Обычный разговор",
-    )
+#     result = await ask_llm(
+#         user_input,
+#         group_prompt="Обычный разговор",
+#     )
 
-    print("\nОтвет от Groq:")
-    print(result)
+#     print("\nОтвет от Groq:")
+#     print(result)
 
-    addressee = await detect_addressee(user_input)
-    print(f"\nАдресат: {addressee!r}")
+#     addressee = await detect_addressee(user_input)
+#     print(f"\nАдресат: {addressee!r}")
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# if __name__ == "__main__":
+#     asyncio.run(main())
