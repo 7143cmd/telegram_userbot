@@ -5,9 +5,12 @@ from pathlib import Path
 
 import requests
 
-CONFIG_PATH = Path(__file__).with_name("config.json")
+CURRENT_FILE = Path(__file__).resolve()
 
-PROMPTS_DIR = Path(__file__).parent / "prompts"
+PROJECT_DIR = CURRENT_FILE.parent.parent
+
+CONFIG_PATH = PROJECT_DIR / "config.json"
+PROMPTS_DIR = PROJECT_DIR / "prompts"
 
 _ADDRESSEE_SYSTEM_PROMPT = (PROMPTS_DIR / "addressee.txt").read_text(encoding="utf-8")
 _HUMAN_PROMPT = (PROMPTS_DIR / "human.txt").read_text(encoding="utf-8")
