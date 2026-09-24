@@ -1,18 +1,10 @@
 {
-  "id": 12345678,
-  "hash": "your_api_hash_here",
-  "name": "Alex",
-
-  "session_name": "userbot_session",
-
   "groq_api_key": "your_groq_api_key_here",
 
   "groups": {
     "work": "обсуждение работы",
     "friends": "неформальное общение с друзьями"
   },
-  
-  "min_random_cooldown": 5,
-  "max_random_cooldown": 10,
+
   "cooldown_seconds": 3
 }
