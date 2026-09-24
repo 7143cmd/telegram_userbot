@@ -4,3 +4,5 @@ userbot_session.session-journal
 config.json
 .env
 __pycache__
+sessions/*
+keys/*

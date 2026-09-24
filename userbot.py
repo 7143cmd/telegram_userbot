@@ -117,12 +117,6 @@ async def main():
 
     last_reply_ts: dict[int, float] = {}
 
-    async def maybe_sleep_like_typing():
-        if max_cooldown <= 0:
-            return
-        delay = random.randint(min_cooldown, max_cooldown)
-        await asyncio.sleep(delay)
-
     @client.on(events.NewMessage())
     async def handler(event):
         group_info = group_map.get(event.chat_id)

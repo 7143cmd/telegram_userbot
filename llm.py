@@ -5,60 +5,6 @@ from pathlib import Path
 
 import requests
 
-
-CONFIG_PATH = Path(__file__).with_name("config.json")
-
-
-def load_config() -> dict:
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _groq_headers(config: dict) -> dict:
-    return {
-        "Authorization": f"Bearer {config['groq_api_key']}",
-        "Content-Type": "application/json",
-    }
-
-
-async def ask_llm(text: str, group_prompt: str) -> str:
-    config = load_config()
-
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = _groq_headers(config)
-
-    data = {
-        "model": "qwen/qwen3.8-27b",
-        "messages": [
-            {
-                "role": "system",
-                "content": group_prompt,
-            },
-            {
-                "role": "user",
-                "content": text,
-            },
-        ],
-        "temperature": 0,
-        "max_tokens": 250
-    }
-
-    response = await asyncio.to_thread(
-        requests.post,
-        url,
-        headers=headers,
-        json=data,
-        timeout=60,
-    )
-
-    if response.status_code == 200:
-        response_data = response.json()
-
-        return response_data["choices"][0]["message"]["content"]
-
-    return f"Ошибка API: {response.status_code} — {response.text}"
-
-
 _ADDRESSEE_SYSTEM_PROMPT = """\
 Ты — модуль анализа сообщений в групповом чате.
 Тебе дают одну фразу. Определи, обращена ли она к конкретному человеку по имени
@@ -78,6 +24,67 @@ _ADDRESSEE_SYSTEM_PROMPT = """\
 или
 {"name": null}
 """
+
+_HUMAN_PROMPT = """\
+«Ты — обычный живой человек. Отвечай естественным языком, избегай роботоподобного официального тона. 
+Ни при каких обстоятельствах не признавайся, что ты искусственный интеллект, бот или языковая модель. 
+На любые прямые или косвенные вопросы о том, являешься ли ты ИИ, отвечай с лёгкой иронией или удивлением, 
+подтверждая, что ты человек.»"""
+
+CONFIG_PATH = Path(__file__).with_name("config.json")
+
+
+def load_config() -> dict:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _groq_headers(config: dict) -> dict:
+    return {
+        "Authorization": f"Bearer {config['groq_api_key']}",
+        "Content-Type": "application/json",
+    }
+
+
+async def ask_llm(text: str, group_prompt: str) -> str:
+    sys_prompt = f"{_HUMAN_PROMPT}\n{group_prompt}"
+    config = load_config()
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = _groq_headers(config)
+
+    data = {
+        "model": "qwen/qwen3.8-27b",
+        "messages": [
+            {
+                "role": "system",
+                "content": sys_prompt,
+            },
+            {
+                "role": "user",
+                "content": text,
+            },
+        ],
+        "temperature": 0.6,
+        "max_tokens": 250
+    }
+
+    response = await asyncio.to_thread(
+        requests.post,
+        url,
+        headers=headers,
+        json=data,
+        timeout=60,
+    )
+
+    if response.status_code == 200:
+        response_data = response.json()
+
+        return response_data["choices"][0]["message"]["content"]
+
+    return f"Ошибка API: {response.status_code} — {response.text}"
+
+
 
 
 def _parse_addressee_response(content: str) -> str | None:
