@@ -148,7 +148,11 @@ def _names_match(detected: str, trigger_name: str) -> bool:
         return True
     return SequenceMatcher(None, a, b).ratio() >= 0.8
 
-async def collect_context(event, limit: int = 10) -> dict:
+async def collect_context(
+    event,
+    limit: int = 10,
+    min_message_id: Optional[int] = None,
+) -> dict:
     trigger = {
         "id": event.id,
         "sender_id": event.sender_id,
@@ -163,9 +167,14 @@ async def collect_context(event, limit: int = 10) -> dict:
         event.chat_id,
         limit=limit + 1,
     ):
-
         if message.id == event.id:
             continue
+
+        # Ignore every message that belongs to the previous topic.
+        # The message that opened the new topic is the first valid
+        # message of the new context.
+        if min_message_id is not None and message.id < min_message_id:
+            break
 
         messages.append({
             "id": message.id,
@@ -199,6 +208,11 @@ class GroupState:
     last_handled_message_id: Optional[int] = None
     recent_speakers: list = field(default_factory=list)
 
+    # Runtime state of the currently active discussion topic.
+    theme: str = ""
+    theme_version: int = 0
+    theme_started_message_id: Optional[int] = None
+
 
 def create_dm_handler(account: Account, group_map: dict[int, GroupState]):
     async def handler(event: events.NewMessage.Event):
@@ -225,12 +239,40 @@ def create_dm_handler(account: Account, group_map: dict[int, GroupState]):
             return
 
         for chat_id, group_state in group_map.items():
+            # Switch the runtime state immediately. Every new LLM request
+            # will use this theme and a new theme version.
+            group_state.theme = text
+            group_state.theme_version += 1
+            group_state.recent_speakers.clear()
+            group_state.theme_started_message_id = None
+
+            current_theme_version = group_state.theme_version
+
             try:
-                opening_text = await generate_opening_message(text, group_state.prompt)
-                await account.client.send_message(chat_id, opening_text)
-                print(f"[OPEN] {account.label} -> [{group_state.title}] {opening_text!r}")
+                opening_text = await generate_opening_message(
+                    text,
+                    group_state.prompt,
+                )
+
+                sent_message = await account.client.send_message(
+                    chat_id,
+                    opening_text,
+                )
+
+                # Everything before this message belongs to the previous topic.
+                group_state.theme_started_message_id = sent_message.id
+
+                print(
+                    f"[OPEN] {account.label} -> [{group_state.title}] "
+                    f"theme_version={current_theme_version}, "
+                    f"start_message_id={sent_message.id}, "
+                    f"{opening_text!r}"
+                )
             except Exception as e:
-                print(f"[ERROR] Не удалось открыть новую тему в группе '{group_state.title}': {e}")
+                print(
+                    f"[ERROR] Не удалось открыть новую тему "
+                    f"в группе '{group_state.title}': {e}"
+                )
 
     return handler
 
@@ -268,10 +310,19 @@ async def main():
             print(f"[OK] {admin.label}: админ, исключён из общения — только слушает ЛС")
 
     group_map: dict[int, GroupState] = {}
+    initial_theme = load_theme()
+
     raw_group_map = await resolve_all_groups(participants[0].client, groups_config)
     for chat_id, info in raw_group_map.items():
-        group_map[chat_id] = GroupState(title=info["title"], prompt=info["prompt"])
-        print(f"[OK] Слушаю группу: {info['title']} (id={chat_id})")
+        group_map[chat_id] = GroupState(
+            title=info["title"],
+            prompt=info["prompt"],
+            theme=initial_theme,
+        )
+        print(
+            f"[OK] Слушаю группу: {info['title']} (id={chat_id}), "
+            f"начальная тема: {initial_theme!r}"
+        )
 
     def account_by_id(user_id: int) -> Optional[Account]:
         return next((a for a in participants if a.me_id == user_id), None)
@@ -335,35 +386,76 @@ async def main():
                 should_reply_as_mention = False
 
             try:
-                context = await collect_context(event, limit=10)
+                # Snapshot the topic state for this particular generation.
+                # If an admin changes the topic while the LLM is working,
+                # the generated answer becomes stale and will not be sent.
+                theme = group_state.theme
+                theme_version = group_state.theme_version
+                theme_started_message_id = group_state.theme_started_message_id
+
+                context = await collect_context(
+                    event,
+                    limit=10,
+                    min_message_id=theme_started_message_id,
+                )
                 context_trigger = context["trigger"]
                 context_history = context["messages"]
 
-                theme = load_theme()
-                print(f"[THEME] {theme!r}")
+                print(
+                    f"[THEME] [{group_state.title}] "
+                    f"version={theme_version}, "
+                    f"start_message_id={theme_started_message_id}, "
+                    f"{theme!r}"
+                )
 
                 llm_task = asyncio.create_task(
-                    ask_llm(context_trigger, context_history, group_state.prompt, theme)
+                    ask_llm(
+                        context_trigger,
+                        context_history,
+                        group_state.prompt,
+                        theme,
+                    )
                 )
 
                 if min_cooldown or max_cooldown:
                     await asyncio.sleep(random.uniform(min_cooldown, max_cooldown))
 
-                async with target_account.client.action(event.chat_id, 'typing'):  # type: ignore
+                async with target_account.client.action(
+                    event.chat_id,
+                    'typing',
+                ):  # type: ignore
                     reply_text = await llm_task
                     typing_time = min(max(len(reply_text) * 0.05, 1.5), 10)
                     await asyncio.sleep(typing_time)
 
+                # The topic may have changed while the LLM was generating
+                # or while the bot was simulating typing.
+                if theme_version != group_state.theme_version:
+                    print(
+                        f"[SKIP] Устаревший ответ [{group_state.title}]: "
+                        f"generated_version={theme_version}, "
+                        f"current_version={group_state.theme_version}"
+                    )
+                    return
+
                 if should_reply_as_mention:
                     await target_account.client.send_message(
-                        event.chat_id, reply_text, reply_to=event.id
+                        event.chat_id,
+                        reply_text,
+                        reply_to=event.id,
                     )
                     kind = "REPLY"
                 else:
-                    await target_account.client.send_message(event.chat_id, reply_text)
+                    await target_account.client.send_message(
+                        event.chat_id,
+                        reply_text,
+                    )
                     kind = "TEXT"
 
-                print(f"[{kind}] [{group_state.title}] {target_account.label} -> {text!r} :: {reply_text!r}")
+                print(
+                    f"[{kind}] [{group_state.title}] {target_account.label} "
+                    f"(theme_version={theme_version}) -> {text!r} :: {reply_text!r}"
+                )
 
                 max_recent = max(1, min(2, len(participants) - 1))
                 group_state.recent_speakers.append(target_account.me_id)
