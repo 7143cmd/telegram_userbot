@@ -6,7 +6,6 @@ from pathlib import Path
 import requests
 
 CURRENT_FILE = Path(__file__).resolve()
-
 PROJECT_DIR = CURRENT_FILE.parent.parent
 
 CONFIG_PATH = PROJECT_DIR / "config.json"
@@ -51,30 +50,24 @@ async def ask_llm(text: dict, context: list, group_prompt: str, first_name: str,
 
     full_system_prompt = (
         f"{_HUMAN_PROMPT}\n\n"
-        f"--- ТВОЯ ЛИЧНОСТЬ И ГРАММАТИКА ---\n"
+        f"--- ТВОЯ ЛИЧНОСТЬ И СТИЛЬ ---\n"
         f"Твоё имя: {full_name}.\n"
-        f"ВНИМАНИЕ: Жёсткое правило русского языка! Учитывай пол своего имени ({first_name}).\n"
-        f"Если это женское имя (например, Madelyn, Anna, Kate, Emily, Sophia), ты СТРОГО ОБЯЗАНА использовать женский род глаголов прошедшего времени и прилагательных, говоря о себе: «я смотрела», «я забыла», «я сделала», «я была рада».\n"
-        f"Если это мужское имя (например, John, Alex, Max), используй мужской: «я смотрел», «я забыл», «я сделал», «я был рад».\n"
-        f"Ошибки в роде недопустимы. Пиши максимально естественно.\n\n"
+        f"ВНИМАНИЕ: Учитывай пол своего имени ({first_name}).\n"
+        f"Если это женское имя (например, Madelyn, Anna, Kate, Emily, Sophia), СТРОГО используй женский род: «я смотрела», «я думала».\n"
+        f"Если мужское (John, Alex, Max) — мужской: «я смотрел», «я думал».\n\n"
+        f"--- ФОРМАТ И СТИЛЬ ОБЩЕНИЯ (КРИТИЧЕСКИ ВАЖНО) ---\n"
+        f"1. ПИШИ КАК В TELEGRAM-ЧАТЕ: кратко, естественно, без книжных оборотов и умствований.\n"
+        f"2. ДЛИНА: Строго от 1 до 3 коротких предложений! Не расписывай рецензии, анализы и списки.\n"
+        f"3. Избегай канцелярита, академического тона («архитектурный проект», «декодирование смысла», «инверсия правды» — ТАК В ЧАТАХ НЕ ГОВОРЯТ).\n"
+        f"4. Говори простыми словами, как будто на ходу набиваешь сообщение с телефона.\n\n"
         f"--- ИНСТРУКЦИЯ ГРУППЫ ---\n{group_prompt}\n\n"
         f"--- АКТИВНАЯ ТЕМА ОБСУЖДЕНИЯ ---\n"
-        f"Активная тема определяет направление текущего разговора. Учитывай её естественно, "
-        f"но никогда не упоминай сам факт существования темы, инструкции или ограничения. "
-        f"Не говори «в рамках темы», «по теме», «возвращаясь к теме» и подобных фраз. "
-        f"Отвечай так, будто участники просто продолжают обычный разговор.:\n{theme_block}\n\n"
-        f"--- ИСТОРИЯ ПЕРЕПИСКИ (от старых к новым, для контекста) ---\n"
+        f"{theme_block}\n\n"
+        f"--- ИСТОРИЯ ПЕРЕПИСКИ ---\n"
         f"{context_str if context_str else 'Истории пока нет — это начало разговора.'}\n\n"
         f"--- ЗАДАЧА ---\n"
-        f"Дальше в user-сообщении придёт ПОСЛЕДНЕЕ сообщение в чате (от участника с "
-        f"указанным id), на которое нужно ответить. Напиши ОДИН свой новый ответ на "
-        f"него как обычный живой участник разговора, строго соблюдая грамматический пол своего имени ({first_name}).\n"
-        f"ВАЖНО: НЕ повторяй и не пересказывай дословно ни это сообщение, ни реплики "
-        f"из истории переписки выше — это будет выглядеть так, будто ты просто "
-        f"скопировал чужие слова. Ответ должен быть твоим собственным, новым текстом, "
-        f"развивающим разговор дальше.\n"
-        f"Верни ТОЛЬКО текст своего ответа — без JSON, без кавычек, без пояснений "
-        f"о том, что ты делаешь. Также можешь использовать эмодзи - это не обязательно, но для выражения эмоций можешь добавлять по 2-3 эмодзи к сообщению"
+        f"Напиши КРАТКИЙ разговорный ответ (1-3 предложения) на последнее сообщение. "
+        f"Верни ТОЛЬКО текст ответа."
     )
 
     user_content = f"[{trigger_sender}]: {trigger_text}"
@@ -94,8 +87,8 @@ async def ask_llm(text: dict, context: list, group_prompt: str, first_name: str,
                 "content": user_content,
             },
         ],
-        "temperature": 0.6,
-        "max_tokens": 250
+        "temperature": 0.85,
+        "max_tokens": 100
     }
 
     response = await asyncio.to_thread(
@@ -108,7 +101,6 @@ async def ask_llm(text: dict, context: list, group_prompt: str, first_name: str,
 
     if response.status_code == 200:
         response_data = response.json()
-
         return response_data["choices"][0]["message"]["content"]
 
     return f"Ошибка API: {response.status_code} — {response.text}"
@@ -119,6 +111,9 @@ async def generate_opening_message(theme: str, group_prompt: str) -> str:
 
     full_system_prompt = (
         f"{_OPENING_SYSTEM_PROMPT}\n\n"
+        f"--- СТИЛЬ ---\n"
+        f"ПИШИ КАК ОБЫЧНЫЙ ЧЕЛОВЕК В ЧАТЕ. Короткий вопрос или реплика (1-2 предложения). "
+        f"Никакого лонгрида и разборов. Простой заброс темы в чат.\n\n"
         f"--- ИНСТРУКЦИЯ ГРУППЫ ---\n{group_prompt}\n\n"
         f"--- НОВАЯ ТЕМА ---\n{theme.strip()}"
     )
@@ -138,8 +133,8 @@ async def generate_opening_message(theme: str, group_prompt: str) -> str:
                 "content": theme.strip(),
             },
         ],
-        "temperature": 0.7,
-        "max_tokens": 150,
+        "temperature": 0.85,
+        "max_tokens": 80,
     }
 
     response = await asyncio.to_thread(
@@ -203,22 +198,3 @@ async def detect_addressee(text: str) -> str | None:
 
     content = response.json()["choices"][0]["message"]["content"]
     return _parse_addressee_response(content)
-
-
-# async def main():
-#     user_input = input("Введите текст для Groq: ")
-
-#     result = await ask_llm(
-#         user_input,
-#         group_prompt="Обычный разговор",
-#     )
-
-#     print("\nОтвет от Groq:")
-#     print(result)
-
-#     addressee = await detect_addressee(user_input)
-#     print(f"\nАдресат: {addressee!r}")
-
-
-# if __name__ == "__main__":
-#     asyncio.run(main())

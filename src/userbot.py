@@ -18,7 +18,6 @@ CONFIG_PATH = BASE_DIR / "config.json"
 KEYS_DIR = BASE_DIR / "keys"
 SESSIONS_DIR = BASE_DIR / "sessions"
 
-STARTER_MESSAGE = "Как прошёл твой день?"
 
 def load_config() -> dict:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -432,9 +431,15 @@ async def main():
         admin.client.add_event_handler(create_dm_handler(admin, group_map, startup_cutoff), events.NewMessage())
 
     starter_account = random.choice(participants)
-    for chat_id in group_map:
-        await starter_account.client.send_message(chat_id, STARTER_MESSAGE)
-        print(f"[START] {starter_account.label} -> {STARTER_MESSAGE!r}")
+    current_theme = load_theme()
+
+    for chat_id, group_state in group_map.items():
+        try:
+            starter_message = await generate_opening_message(current_theme, group_state.prompt)
+            await starter_account.client.send_message(chat_id, starter_message)
+            print(f"[START] {starter_account.label} -> [{group_state.title}] {starter_message!r}")
+        except Exception as e:
+            print(f"[ERROR] Не удалось сгенерировать стартовое сообщение для группы '{group_state.title}': {e}")
 
     print("[OK] Все боты запущены и слушают сообщения. Ctrl+C для остановки.")
     await asyncio.gather(*(a.client.run_until_disconnected() for a in accounts))  # type: ignore
