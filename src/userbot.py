@@ -9,17 +9,31 @@ from typing import Optional
 
 from telethon import TelegramClient, events, utils
 
-from llm import ask_llm, detect_addressee
+from llm import ask_llm, detect_addressee, generate_opening_message
 
-CONFIG_PATH = Path(__file__).with_name("config.json")
-KEYS_DIR = Path(__file__).with_name("keys")
-SESSIONS_DIR = Path(__file__).with_name("sessions")
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-STARTER_MESSAGE = "Как прошёл твой день?"
+CONFIG_PATH = BASE_DIR / "config.json"
+KEYS_DIR = BASE_DIR / "keys"
+SESSIONS_DIR = BASE_DIR / "sessions"
+
+STARTER_MESSAGE = "Какой лучший фильм на ваш взгляд?"
 
 def load_config() -> dict:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_theme() -> str:
+    config = load_config()
+    return str(config.get("theme_of_suggestion", "") or "")
+
+
+def save_theme(new_theme: str) -> None:
+    config = load_config()
+    config["theme_of_suggestion"] = new_theme
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
 
 @dataclass
 class Account:
@@ -183,6 +197,42 @@ class GroupState:
     prompt: str
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_handled_message_id: Optional[int] = None
+    recent_speakers: list = field(default_factory=list)
+
+
+def create_dm_handler(account: Account, group_map: dict[int, GroupState]):
+    async def handler(event: events.NewMessage.Event):
+        if not (event.is_private and not event.out):
+            return
+
+        sender = await event.get_sender()
+
+        first_name = getattr(sender, "first_name", "") or ""
+        last_name = getattr(sender, "last_name", "") or ""
+        sender_name = f"{first_name} {last_name}".strip() or "Неизвестный"
+
+        text = (event.raw_text or "").strip()
+        print(f"[DM] {account.name} <- {sender_name}: {text}")
+
+        if not text:
+            return
+
+        try:
+            save_theme(text)
+            print(f"[THEME UPDATED] {text!r}")
+        except Exception as e:
+            print(f"[ERROR] Не удалось сохранить новую тему: {e}")
+            return
+
+        for chat_id, group_state in group_map.items():
+            try:
+                opening_text = await generate_opening_message(text, group_state.prompt)
+                await account.client.send_message(chat_id, opening_text)
+                print(f"[OPEN] {account.label} -> [{group_state.title}] {opening_text!r}")
+            except Exception as e:
+                print(f"[ERROR] Не удалось открыть новую тему в группе '{group_state.title}': {e}")
+
+    return handler
 
 
 async def main():
@@ -203,22 +253,34 @@ async def main():
         await account.client.start()  # type: ignore
         me = await account.client.get_me()
         account.me_id = me.id
-        print(f"[OK] Аккаунт готов: {account.label} (id={account.me_id})")
+        print(f"[OK] Аккаунт готов: {account.label:<13} (id={account.me_id:<11})")
+
+    admin_accounts = [a for a in accounts if a.is_admin]
+    participants = [a for a in accounts if not a.is_admin]
+
+    if not participants:
+        raise RuntimeError(
+            "Нет ни одного аккаунта-участника: все найденные аккаунты помечены как admin."
+        )
+
+    if admin_accounts:
+        for admin in admin_accounts:
+            print(f"[OK] {admin.label}: админ, исключён из общения — только слушает ЛС")
 
     group_map: dict[int, GroupState] = {}
-    raw_group_map = await resolve_all_groups(accounts[0].client, groups_config)
+    raw_group_map = await resolve_all_groups(participants[0].client, groups_config)
     for chat_id, info in raw_group_map.items():
         group_map[chat_id] = GroupState(title=info["title"], prompt=info["prompt"])
         print(f"[OK] Слушаю группу: {info['title']} (id={chat_id})")
 
     def account_by_id(user_id: int) -> Optional[Account]:
-        return next((a for a in accounts if a.me_id == user_id), None)
+        return next((a for a in participants if a.me_id == user_id), None)
 
     async def handle_message(event):
         group_state = group_map.get(event.chat_id)
         if group_state is None:
             return
-        
+
         if event.out:
             return
 
@@ -233,7 +295,7 @@ async def main():
             sender_label = sender_account.label if sender_account else str(sender_id)
             print(f"[DEBUG] [{group_state.title}] {sender_label}: {text!r}")
 
-            other_accounts = [a for a in accounts if a.me_id != sender_id]
+            other_accounts = [a for a in participants if a.me_id != sender_id]
             if not other_accounts:
                 return
 
@@ -266,7 +328,10 @@ async def main():
                         return
 
             if target_account is None:
-                target_account = random.choice(other_accounts)
+
+                recently_excluded_ids = set(group_state.recent_speakers) | {sender_id}
+                candidates = [a for a in other_accounts if a.me_id not in recently_excluded_ids]
+                target_account = random.choice(candidates or other_accounts)
                 should_reply_as_mention = False
 
             try:
@@ -274,7 +339,12 @@ async def main():
                 context_trigger = context["trigger"]
                 context_history = context["messages"]
 
-                llm_task = asyncio.create_task(ask_llm(context_trigger, context_history, group_state.prompt))
+                theme = load_theme()
+                print(f"[THEME] {theme!r}")
+
+                llm_task = asyncio.create_task(
+                    ask_llm(context_trigger, context_history, group_state.prompt, theme)
+                )
 
                 if min_cooldown or max_cooldown:
                     await asyncio.sleep(random.uniform(min_cooldown, max_cooldown))
@@ -294,16 +364,23 @@ async def main():
                     kind = "TEXT"
 
                 print(f"[{kind}] [{group_state.title}] {target_account.label} -> {text!r} :: {reply_text!r}")
+
+                max_recent = max(1, min(2, len(participants) - 1))
+                group_state.recent_speakers.append(target_account.me_id)
+                group_state.recent_speakers = group_state.recent_speakers[-max_recent:]
             except Exception as e:
                 print(f"[ERROR] Не удалось ответить ({target_account.label}): {e}")
 
-    for account in accounts:
+    for account in participants:
         account.client.add_event_handler(handle_message, events.NewMessage())
 
-    starter_account = random.choice(accounts)
+    starter_account = random.choice(participants)
     for chat_id in group_map:
         await starter_account.client.send_message(chat_id, STARTER_MESSAGE)
         print(f"[START] {starter_account.label} -> {STARTER_MESSAGE!r}")
+
+    for admin in admin_accounts:
+        admin.client.add_event_handler(create_dm_handler(admin, group_map), events.NewMessage())
 
     print("[OK] Все боты запущены и слушают сообщения. Ctrl+C для остановки.")
     await asyncio.gather(*(a.client.run_until_disconnected() for a in accounts))  # type: ignore
