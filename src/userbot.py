@@ -390,7 +390,14 @@ async def main():
                 print(f"[THEME] {theme!r}")
 
                 llm_task = asyncio.create_task(
-                    ask_llm(context_trigger, context_history, group_state.prompt, theme)
+                    ask_llm(
+                        context_trigger,
+                        context_history,
+                        group_state.prompt,
+                        target_account.first_name,
+                        target_account.last_name,
+                        theme,
+                    )
                 )
 
                 if min_cooldown or max_cooldown:

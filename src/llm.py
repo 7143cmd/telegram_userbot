@@ -36,7 +36,7 @@ def _format_history_item(item) -> str:
     return f"[{sender}]: {body}"
 
 
-async def ask_llm(text: dict, context: list, group_prompt: str, theme_of_suggestion: str = "") -> str:
+async def ask_llm(text: dict, context: list, group_prompt: str, first_name: str, last_name: str, theme_of_suggestion: str = "") -> str:
 
     config = load_config()
 
@@ -47,8 +47,16 @@ async def ask_llm(text: dict, context: list, group_prompt: str, theme_of_suggest
 
     theme_block = theme_of_suggestion.strip() if theme_of_suggestion else "Тема не задана — общайтесь свободно в рамках группы."
 
+    full_name = f"{first_name} {last_name}".strip() or "Участник"
+
     full_system_prompt = (
         f"{_HUMAN_PROMPT}\n\n"
+        f"--- ТВОЯ ЛИЧНОСТЬ И ГРАММАТИКА ---\n"
+        f"Твоё имя: {full_name}.\n"
+        f"ВНИМАНИЕ: Жёсткое правило русского языка! Учитывай пол своего имени ({first_name}).\n"
+        f"Если это женское имя (например, Madelyn, Anna, Kate, Emily, Sophia), ты СТРОГО ОБЯЗАНА использовать женский род глаголов прошедшего времени и прилагательных, говоря о себе: «я смотрела», «я забыла», «я сделала», «я была рада».\n"
+        f"Если это мужское имя (например, John, Alex, Max), используй мужской: «я смотрел», «я забыл», «я сделал», «я был рад».\n"
+        f"Ошибки в роде недопустимы. Пиши максимально естественно.\n\n"
         f"--- ИНСТРУКЦИЯ ГРУППЫ ---\n{group_prompt}\n\n"
         f"--- АКТИВНАЯ ТЕМА ОБСУЖДЕНИЯ ---\n"
         f"Активная тема определяет направление текущего разговора. Учитывай её естественно, "
@@ -60,7 +68,7 @@ async def ask_llm(text: dict, context: list, group_prompt: str, theme_of_suggest
         f"--- ЗАДАЧА ---\n"
         f"Дальше в user-сообщении придёт ПОСЛЕДНЕЕ сообщение в чате (от участника с "
         f"указанным id), на которое нужно ответить. Напиши ОДИН свой новый ответ на "
-        f"него как обычный живой участник разговора.\n"
+        f"него как обычный живой участник разговора, строго соблюдая грамматический пол своего имени ({first_name}).\n"
         f"ВАЖНО: НЕ повторяй и не пересказывай дословно ни это сообщение, ни реплики "
         f"из истории переписки выше — это будет выглядеть так, будто ты просто "
         f"скопировал чужие слова. Ответ должен быть твоим собственным, новым текстом, "
