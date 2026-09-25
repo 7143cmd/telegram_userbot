@@ -312,120 +312,132 @@ async def main():
     def account_by_id(user_id: int) -> Optional[Account]:
         return next((a for a in participants if a.me_id == user_id), None)
 
-    async def handle_message(event):
-        group_state = group_map.get(event.chat_id)
-        if group_state is None:
-            return
-
-        if event.out:
-            return
-
-        if event.date and event.date.timestamp() < startup_cutoff:
-            return
-
-        print(f"[TRACE] event.id={event.id} chat_id={event.chat_id} sender={event.sender_id} lock_id={id(group_state)}")
-
-        async with group_state.lock:
-            if group_state.last_handled_message_id == event.id:
-                print(f"[TRACE] event.id={event.id} уже обработан ранее — пропускаю")
-                return
-            group_state.last_handled_message_id = event.id
-
-            text = event.raw_text or ""
-            sender_id = event.sender_id
-            sender_account = account_by_id(sender_id)
-            sender_label = sender_account.label if sender_account else str(sender_id)
-            print(f"[DEBUG] [{group_state.title}] {sender_label}: {text!r}")
-
-            other_accounts = [a for a in participants if a.me_id != sender_id]
-            if not other_accounts:
+    def create_message_handler(account: Account):
+        async def handle_message(event):
+            group_state = group_map.get(event.chat_id)
+            if group_state is None:
                 return
 
-            target_account: Optional[Account] = None
-            should_reply_as_mention = False
+            if event.sender_id == account.me_id:
+                return
 
-            if event.is_reply:
-                try:
-                    replied = await event.get_reply_message()
-                except Exception as e:
-                    print(f"[ERROR] get_reply_message: {e}")
-                    replied = None
-                if replied:
-                    target_account = next(
-                        (a for a in other_accounts if a.me_id == replied.sender_id), None
-                    )
-                    if target_account is not None:
-                        should_reply_as_mention = True
-                        print(f"[DEBUG] reply на сообщение {target_account.label}")
+            if event.date and event.date.timestamp() < startup_cutoff:
+                return
 
-            if target_account is None:
-                try:
-                    addressee = await detect_addressee(text)
-                    print(f"[ADDRESSEE] {addressee!r}")
-                except Exception as e:
-                    print(f"[ERROR] detect_addressee: {e}")
-                    addressee = None
+            print(f"[TRACE] event.id={event.id} chat_id={event.chat_id} sender={event.sender_id} lock_id={id(group_state)}")
 
-                if addressee is not None:
-                    matched = _find_addressed_account(addressee, other_accounts)
-                    if matched is not None:
-                        target_account = matched
-                        should_reply_as_mention = True
-                    else:
-                        print(f"[DEBUG] '{addressee}' не совпало ни с одним ботом — отвечаем как на обычное сообщение")
+            async with group_state.lock:
 
-            if target_account is None:
-                recently_excluded_ids = set(group_state.recent_speakers) | {sender_id}
-                candidates = [a for a in other_accounts if a.me_id not in recently_excluded_ids]
-                target_account = random.choice(candidates or other_accounts)
+                latest_messages = await account.client.get_messages(event.chat_id, limit=1)
+                if not latest_messages:
+                    return
+                
+                latest_msg = latest_messages[0]
+
+                if latest_msg.sender_id == account.me_id:
+                    return
+
+                if group_state.last_handled_message_id == latest_msg.id:
+                    return
+
+                group_state.last_handled_message_id = latest_msg.id
+
+                text = latest_msg.raw_text or ""
+                sender_id = latest_msg.sender_id
+                sender_account = account_by_id(sender_id)
+                sender_label = sender_account.label if sender_account else str(sender_id)
+                
+                print(f"[DEBUG] [{group_state.title}] Ответ на ПОСЛЕДНЕЕ сообщение от {sender_label}: {text!r}")
+
+                other_accounts = [a for a in participants if a.me_id != sender_id]
+                if not other_accounts:
+                    return
+
+                target_account: Optional[Account] = None
                 should_reply_as_mention = False
 
-            try:
-                context = await collect_context(event, limit=10)
-                context_trigger = context["trigger"]
-                context_history = context["messages"]
+                if latest_msg.is_reply:
+                    try:
+                        replied = await latest_msg.get_reply_message()
+                    except Exception as e:
+                        replied = None
+                    if replied:
+                        target_account = next(
+                            (a for a in other_accounts if a.me_id == replied.sender_id), None
+                        )
+                        if target_account is not None:
+                            should_reply_as_mention = True
 
-                theme = load_theme()
-                print(f"[THEME] {theme!r}")
+                if target_account is None:
+                    try:
+                        addressee = await detect_addressee(text)
+                    except Exception:
+                        addressee = None
 
-                llm_task = asyncio.create_task(
-                    ask_llm(
-                        context_trigger,
-                        context_history,
-                        group_state.prompt,
-                        target_account.first_name,
-                        target_account.last_name,
-                        theme,
+                    if addressee is not None:
+                        matched = _find_addressed_account(addressee, other_accounts)
+                        if matched is not None:
+                            target_account = matched
+                            should_reply_as_mention = True
+
+                if target_account is None:
+                    recently_excluded_ids = set(group_state.recent_speakers) | {sender_id}
+                    candidates = [a for a in other_accounts if a.me_id not in recently_excluded_ids]
+                    target_account = random.choice(candidates or other_accounts)
+                    should_reply_as_mention = False
+
+                try:
+                    context = await collect_context(latest_msg, limit=10)
+                    context_trigger = context["trigger"]
+                    context_history = context["messages"]
+
+                    theme = load_theme()
+
+                    llm_task = asyncio.create_task(
+                        ask_llm(
+                            context_trigger,
+                            context_history,
+                            group_state.prompt,
+                            target_account.first_name,
+                            target_account.last_name,
+                            theme,
+                        )
                     )
-                )
 
-                if min_cooldown or max_cooldown:
-                    await asyncio.sleep(random.uniform(min_cooldown, max_cooldown))
+                    if min_cooldown or max_cooldown:
+                        await asyncio.sleep(random.uniform(min_cooldown, max_cooldown))
 
-                async with target_account.client.action(event.chat_id, 'typing'):  # type: ignore
-                    reply_text = await llm_task
-                    typing_time = min(max(len(reply_text) * 0.05, 1.5), 10)
-                    await asyncio.sleep(typing_time)
+                    async with target_account.client.action(event.chat_id, 'typing'):  # type: ignore
+                        reply_text = await llm_task
+                        typing_time = min(max(len(reply_text) * 0.05, 1.5), 8)
+                        await asyncio.sleep(typing_time)
 
-                if should_reply_as_mention:
-                    await target_account.client.send_message(
-                        event.chat_id, reply_text, reply_to=event.id
-                    )
-                    kind = "REPLY"
-                else:
-                    await target_account.client.send_message(event.chat_id, reply_text)
-                    kind = "TEXT"
+                    if should_reply_as_mention:
+                        sent_msg = await target_account.client.send_message(
+                            event.chat_id, reply_text, reply_to=latest_msg.id
+                        )
+                        kind = "REPLY"
+                    else:
+                        sent_msg = await target_account.client.send_message(event.chat_id, reply_text)
+                        kind = "TEXT"
 
-                print(f"[{kind}] [{group_state.title}] {target_account.label} -> {text!r} :: {reply_text!r}")
+                    if sent_msg:
+                        group_state.last_handled_message_id = sent_msg.id
 
-                max_recent = max(1, min(2, len(participants) - 1))
-                group_state.recent_speakers.append(target_account.me_id)
-                group_state.recent_speakers = group_state.recent_speakers[-max_recent:]
-            except Exception as e:
-                print(f"[ERROR] Не удалось ответить ({target_account.label}): {e}")
+                    print(f"[{kind}] [{group_state.title}] {target_account.label} -> {text!r} :: {reply_text!r}")
+
+                    max_recent = max(1, min(2, len(participants) - 1))
+                    group_state.recent_speakers.append(target_account.me_id)
+                    group_state.recent_speakers = group_state.recent_speakers[-max_recent:]
+
+                except Exception as e:
+                    print(f"[ERROR] Не удалось ответить ({target_account.label}): {e}")
+
+        return handle_message
+
 
     for account in participants:
-        account.client.add_event_handler(handle_message, events.NewMessage())
+        account.client.add_event_handler(create_message_handler(account), events.NewMessage())
 
     for admin in admin_accounts:
         admin.client.add_event_handler(create_dm_handler(admin, group_map, startup_cutoff), events.NewMessage())
