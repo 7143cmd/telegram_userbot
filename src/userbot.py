@@ -485,7 +485,6 @@ async def main():
     starter_account = random.choice(participants)
     current_theme = load_theme()
 
-    # Начальный старт при запуске
     for chat_id, group_state in group_map.items():
         try:
             async with group_state.lock:
@@ -498,7 +497,6 @@ async def main():
 
                 print(f"[START] {starter_account.label} -> [{group_state.title}] {starter_message!r}")
 
-                # ГЕНЕРИРУЕМ ПЕРВЫЙ ОТВЕТ НА СТАРТОВОЕ СООБЩЕНИЕ
                 await trigger_next_bot_response(chat_id, group_state, participants, sent_msg, min_cooldown, max_cooldown)
 
         except Exception as e:
