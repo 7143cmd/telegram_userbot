@@ -14,8 +14,8 @@ from telethon.tl.functions.messages import ImportChatInviteRequest
 KEYS_DIR = Path(__file__).with_name("keys")
 SESSIONS_DIR = Path(__file__).with_name("sessions")
 
-GROUP_INVITE_LINK = "https://t.me/+qh8IbglsZLU0MDEy"
-GROUP_ID = -5107735777
+GROUP_INVITE_LINK = ""
+GROUP_ID = 
 
 DELAY_BETWEEN_ACCOUNTS = 5
 
