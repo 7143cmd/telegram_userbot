@@ -35,6 +35,7 @@ def save_theme(new_theme: str) -> None:
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
+
 @dataclass
 class Account:
     app_id: int
@@ -75,6 +76,7 @@ def load_accounts() -> list[Account]:
         ))
     return accounts
 
+
 def _candidate_ids(raw_id: int):
     candidates = {raw_id, abs(raw_id)}
     s = str(abs(raw_id))
@@ -84,6 +86,7 @@ def _candidate_ids(raw_id: int):
         candidates.add(int(f"-100{s}"))
         candidates.add(int(f"100{s}"))
     return candidates
+
 
 def _find_group_dialog(dialogs, group_ref):
     try:
@@ -163,7 +166,8 @@ def _names_match(detected: str, trigger_name: str) -> bool:
         return True
     return SequenceMatcher(None, a, b).ratio() >= 0.75
 
-async def collect_context(event, limit: int = 10) -> dict:
+
+async def collect_context(event, topic_start_id: Optional[int] = None, limit: int = 10) -> dict:
     trigger = {
         "id": event.id,
         "sender_id": event.sender_id,
@@ -176,9 +180,11 @@ async def collect_context(event, limit: int = 10) -> dict:
         event.chat_id,
         limit=limit + 1,
     ):
-
         if message.id == event.id:
             continue
+
+        if topic_start_id is not None and message.id < topic_start_id:
+            break
 
         messages.append({
             "id": message.id,
@@ -196,11 +202,13 @@ async def collect_context(event, limit: int = 10) -> dict:
         "messages": messages,
     }
 
+
 def _find_addressed_account(addressee: str, accounts: list[Account]) -> Optional[Account]:
     for account in accounts:
         if _names_match(addressee, account.first_name or account.name):
             return account
     return None
+
 
 @dataclass
 class GroupState:
@@ -209,9 +217,59 @@ class GroupState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_handled_message_id: Optional[int] = None
     recent_speakers: list = field(default_factory=list)
+    current_topic_start_id: Optional[int] = None
 
 
-def create_dm_handler(account: Account, group_map: dict[int, GroupState], startup_cutoff: float):
+async def trigger_next_bot_response(chat_id: int, group_state: GroupState, participants: list[Account], trigger_msg, min_cooldown: int, max_cooldown: int):
+    """Вспомогательная функция генерирует и отправляет ответ следующего случайного бота."""
+    msg_sender_id = trigger_msg.sender_id
+    other_accounts = [a for a in participants if a.me_id != msg_sender_id]
+    if not other_accounts:
+        return
+
+    recently_excluded = set(group_state.recent_speakers) | {msg_sender_id}
+    candidates = [a for a in other_accounts if a.me_id not in recently_excluded]
+    target_account = random.choice(candidates or other_accounts)
+
+    try:
+        context = await collect_context(trigger_msg, topic_start_id=group_state.current_topic_start_id, limit=10)
+        theme = load_theme()
+
+        llm_task = asyncio.create_task(
+            ask_llm(
+                context["trigger"],
+                context["messages"],
+                group_state.prompt,
+                target_account.first_name,
+                target_account.last_name,
+                theme,
+            )
+        )
+
+        if min_cooldown or max_cooldown:
+            await asyncio.sleep(random.uniform(min_cooldown, max_cooldown))
+
+        async with target_account.client.action(chat_id, 'typing'):
+            reply_text = await llm_task
+            typing_time = min(max(len(reply_text) * 0.05, 1.5), 8)
+            await asyncio.sleep(typing_time)
+
+        sent_msg = await target_account.client.send_message(chat_id, reply_text)
+
+        if sent_msg:
+            group_state.last_handled_message_id = sent_msg.id
+
+        print(f"[TEXT] [{group_state.title}] {target_account.label} :: {reply_text!r}")
+
+        max_recent = max(1, min(2, len(participants) - 1))
+        group_state.recent_speakers.append(target_account.me_id)
+        group_state.recent_speakers = group_state.recent_speakers[-max_recent:]
+
+    except Exception as e:
+        print(f"[ERROR] Не удалось ответить ({target_account.label}): {e}")
+
+
+def create_dm_handler(admin_account: Account, participants: list[Account], group_map: dict[int, GroupState], startup_cutoff: float, min_cooldown: int, max_cooldown: int):
     async def handler(event: events.NewMessage.Event):
         if not (event.is_private and not event.out):
             return
@@ -220,13 +278,12 @@ def create_dm_handler(account: Account, group_map: dict[int, GroupState], startu
             return
 
         sender = await event.get_sender()
-
         first_name = getattr(sender, "first_name", "") or ""
         last_name = getattr(sender, "last_name", "") or ""
         sender_name = f"{first_name} {last_name}".strip() or "Неизвестный"
 
         text = (event.raw_text or "").strip()
-        print(f"[DM] {account.name} <- {sender_name}: {text}")
+        print(f"[DM] {admin_account.name} <- {sender_name}: {text}")
 
         if not text:
             return
@@ -241,9 +298,20 @@ def create_dm_handler(account: Account, group_map: dict[int, GroupState], startu
         for chat_id, group_state in group_map.items():
             try:
                 async with group_state.lock:
+                    sender_bot = random.choice(participants)
                     opening_text = await generate_opening_message(text, group_state.prompt)
-                    await account.client.send_message(chat_id, opening_text)
-                    print(f"[OPEN] {account.label} -> [{group_state.title}] {opening_text!r}")
+                    sent_msg = await sender_bot.client.send_message(chat_id, opening_text)
+                    
+                    if sent_msg:
+                        group_state.current_topic_start_id = sent_msg.id
+                        group_state.last_handled_message_id = sent_msg.id
+                        group_state.recent_speakers = [sender_bot.me_id]
+
+                    print(f"[OPEN] {sender_bot.label} -> [{group_state.title}] {opening_text!r}")
+                    
+                    # ПРИНУДИТЕЛЬНО вызываем первого респондента на новое сообщение!
+                    await trigger_next_bot_response(chat_id, group_state, participants, sent_msg, min_cooldown, max_cooldown)
+
             except Exception as e:
                 print(f"[ERROR] Не удалось открыть новую тему в группе '{group_state.title}': {e}")
 
@@ -274,9 +342,7 @@ async def main():
     participants = [a for a in accounts if not a.is_admin]
 
     if not participants:
-        raise RuntimeError(
-            "Нет ни одного аккаунта-участника: все найденные аккаунты помечены как admin."
-        )
+        raise RuntimeError("Нет ни одного аккаунта-участника.")
 
     if admin_accounts:
         for admin in admin_accounts:
@@ -302,11 +368,7 @@ async def main():
         except Exception as e:
             print(f"[WARN] Не удалось получить время последнего сообщения из {chat_id}: {e}")
 
-    if server_timestamps:
-        startup_cutoff = max(server_timestamps)
-    else:
-        startup_cutoff = time.time()
-
+    startup_cutoff = max(server_timestamps) if server_timestamps else time.time()
     print(f"[OK] Точка отсечки времени (startup_cutoff): {startup_cutoff}")
 
     def account_by_id(user_id: int) -> Optional[Account]:
@@ -315,8 +377,7 @@ async def main():
     async def respond_to_human_directly(account: Account, event, group_state):
         try:
             print(f"[DIRECT TASK] {account.label} выполняет персональный ответ человеку на event.id={event.id}")
-            
-            context = await collect_context(event, limit=10)
+            context = await collect_context(event, topic_start_id=group_state.current_topic_start_id, limit=10)
             theme = load_theme()
 
             reply_text = await ask_llm(
@@ -399,6 +460,9 @@ async def main():
                 if group_state.last_handled_message_id == latest_msg.id:
                     return
 
+                if group_state.current_topic_start_id and latest_msg.id < group_state.current_topic_start_id:
+                    return
+
                 group_state.last_handled_message_id = latest_msg.id
 
                 msg_text = latest_msg.raw_text or ""
@@ -408,68 +472,35 @@ async def main():
 
                 print(f"[DEBUG] [{group_state.title}] Ответ на сообщение от {sender_label}: {msg_text!r}")
 
-                other_accounts = [a for a in participants if a.me_id != msg_sender_id]
-                if not other_accounts:
-                    return
-
-                recently_excluded = set(group_state.recent_speakers) | {msg_sender_id}
-                candidates = [a for a in other_accounts if a.me_id not in recently_excluded]
-                target_account = random.choice(candidates or other_accounts)
-
-                try:
-                    context = await collect_context(latest_msg, limit=10)
-                    theme = load_theme()
-
-                    llm_task = asyncio.create_task(
-                        ask_llm(
-                            context["trigger"],
-                            context["messages"],
-                            group_state.prompt,
-                            target_account.first_name,
-                            target_account.last_name,
-                            theme,
-                        )
-                    )
-
-                    if min_cooldown or max_cooldown:
-                        await asyncio.sleep(random.uniform(min_cooldown, max_cooldown))
-
-                    async with target_account.client.action(event.chat_id, 'typing'):
-                        reply_text = await llm_task
-                        typing_time = min(max(len(reply_text) * 0.05, 1.5), 8)
-                        await asyncio.sleep(typing_time)
-
-                    sent_msg = await target_account.client.send_message(event.chat_id, reply_text)
-
-                    if sent_msg:
-                        group_state.last_handled_message_id = sent_msg.id
-
-                    print(f"[TEXT] [{group_state.title}] {target_account.label} :: {reply_text!r}")
-
-                    max_recent = max(1, min(2, len(participants) - 1))
-                    group_state.recent_speakers.append(target_account.me_id)
-                    group_state.recent_speakers = group_state.recent_speakers[-max_recent:]
-
-                except Exception as e:
-                    print(f"[ERROR] Не удалось ответить ({target_account.label}): {e}")
+                await trigger_next_bot_response(event.chat_id, group_state, participants, latest_msg, min_cooldown, max_cooldown)
 
         return handle_message
-
 
     for account in participants:
         account.client.add_event_handler(create_message_handler(account), events.NewMessage())
 
     for admin in admin_accounts:
-        admin.client.add_event_handler(create_dm_handler(admin, group_map, startup_cutoff), events.NewMessage())
+        admin.client.add_event_handler(create_dm_handler(admin, participants, group_map, startup_cutoff, min_cooldown, max_cooldown), events.NewMessage())
 
     starter_account = random.choice(participants)
     current_theme = load_theme()
 
+    # Начальный старт при запуске
     for chat_id, group_state in group_map.items():
         try:
-            starter_message = await generate_opening_message(current_theme, group_state.prompt)
-            await starter_account.client.send_message(chat_id, starter_message)
-            print(f"[START] {starter_account.label} -> [{group_state.title}] {starter_message!r}")
+            async with group_state.lock:
+                starter_message = await generate_opening_message(current_theme, group_state.prompt)
+                sent_msg = await starter_account.client.send_message(chat_id, starter_message)
+                if sent_msg:
+                    group_state.current_topic_start_id = sent_msg.id
+                    group_state.last_handled_message_id = sent_msg.id
+                    group_state.recent_speakers = [starter_account.me_id]
+
+                print(f"[START] {starter_account.label} -> [{group_state.title}] {starter_message!r}")
+
+                # ГЕНЕРИРУЕМ ПЕРВЫЙ ОТВЕТ НА СТАРТОВОЕ СООБЩЕНИЕ
+                await trigger_next_bot_response(chat_id, group_state, participants, sent_msg, min_cooldown, max_cooldown)
+
         except Exception as e:
             print(f"[ERROR] Не удалось сгенерировать стартовое сообщение для группы '{group_state.title}': {e}")
 

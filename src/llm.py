@@ -48,6 +48,12 @@ async def ask_llm(text: dict, context: list, group_prompt: str, first_name: str,
 
     full_name = f"{first_name} {last_name}".strip() or "Участник"
 
+    history_instruction = (
+        f"--- ИСТОРИЯ ПЕРЕПИСКИ (ПО ЭТОЙ ТЕМЕ) ---\n{context_str}\n\n"
+        if context_str else
+        "--- ИСТОРИЯ ПЕРЕПИСКИ ---\nЭто САМОЕ НАЧАЛО диалога по новой теме (предшествующих сообщений нет).\n\n"
+    )
+
     full_system_prompt = (
         f"{_HUMAN_PROMPT}\n\n"
         f"--- ТВОЯ ЛИЧНОСТЬ И СТИЛЬ ---\n"
@@ -63,8 +69,7 @@ async def ask_llm(text: dict, context: list, group_prompt: str, first_name: str,
         f"--- ИНСТРУКЦИЯ ГРУППЫ ---\n{group_prompt}\n\n"
         f"--- АКТИВНАЯ ТЕМА ОБСУЖДЕНИЯ ---\n"
         f"{theme_block}\n\n"
-        f"--- ИСТОРИЯ ПЕРЕПИСКИ ---\n"
-        f"{context_str if context_str else 'Истории пока нет — это начало разговора.'}\n\n"
+        f"{history_instruction}"
         f"--- ЗАДАЧА ---\n"
         f"Напиши КРАТКИЙ разговорный ответ (1-3 предложения) на последнее сообщение, с использованием 2-3 эмодзи. "
         f"Верни ТОЛЬКО текст ответа."
