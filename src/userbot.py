@@ -312,6 +312,36 @@ async def main():
     def account_by_id(user_id: int) -> Optional[Account]:
         return next((a for a in participants if a.me_id == user_id), None)
 
+    async def respond_to_human_directly(account: Account, event, group_state):
+        try:
+            print(f"[DIRECT TASK] {account.label} выполняет персональный ответ человеку на event.id={event.id}")
+            
+            context = await collect_context(event, limit=10)
+            theme = load_theme()
+
+            reply_text = await ask_llm(
+                context["trigger"],
+                context["messages"],
+                group_state.prompt,
+                account.first_name,
+                account.last_name,
+                theme,
+            )
+
+            async with account.client.action(event.chat_id, 'typing'):
+                typing_time = min(max(len(reply_text) * 0.05, 1.5), 6)
+                await asyncio.sleep(typing_time)
+
+            await account.client.send_message(
+                event.chat_id,
+                reply_text,
+                reply_to=event.id
+            )
+            print(f"[REPLY-HUMAN] [{group_state.title}] {account.label} -> {event.raw_text!r} :: {reply_text!r}")
+
+        except Exception as e:
+            print(f"[ERROR] Ошибка в respond_to_human_directly ({account.label}): {e}")
+
     def create_message_handler(account: Account):
         async def handle_message(event):
             group_state = group_map.get(event.chat_id)
@@ -324,14 +354,43 @@ async def main():
             if event.date and event.date.timestamp() < startup_cutoff:
                 return
 
-            print(f"[TRACE] event.id={event.id} chat_id={event.chat_id} sender={event.sender_id} lock_id={id(group_state)}")
+            sender_id = event.sender_id
+            is_human = account_by_id(sender_id) is None
+
+            if is_human:
+                target_bot_for_human: Optional[Account] = None
+                text = event.raw_text or ""
+
+                if event.is_reply:
+                    try:
+                        replied_msg = await event.get_reply_message()
+                        if replied_msg:
+                            target_bot_for_human = next(
+                                (a for a in participants if a.me_id == replied_msg.sender_id), None
+                            )
+                    except Exception as e:
+                        print(f"[ERROR] Ошибка get_reply_message: {e}")
+
+                if target_bot_for_human is None:
+                    try:
+                        addressee = await detect_addressee(text)
+                        if addressee:
+                            target_bot_for_human = _find_addressed_account(addressee, participants)
+                    except Exception as e:
+                        print(f"[ERROR] Ошибка detect_addressee: {e}")
+
+                if target_bot_for_human is not None:
+                    if account.me_id == target_bot_for_human.me_id:
+                        asyncio.create_task(
+                            respond_to_human_directly(account, event, group_state)
+                        )
+                    return
 
             async with group_state.lock:
-
                 latest_messages = await account.client.get_messages(event.chat_id, limit=1)
                 if not latest_messages:
                     return
-                
+
                 latest_msg = latest_messages[0]
 
                 if latest_msg.sender_id == account.me_id:
@@ -342,61 +401,29 @@ async def main():
 
                 group_state.last_handled_message_id = latest_msg.id
 
-                text = latest_msg.raw_text or ""
-                sender_id = latest_msg.sender_id
-                sender_account = account_by_id(sender_id)
-                sender_label = sender_account.label if sender_account else str(sender_id)
-                
-                print(f"[DEBUG] [{group_state.title}] Ответ на ПОСЛЕДНЕЕ сообщение от {sender_label}: {text!r}")
+                msg_text = latest_msg.raw_text or ""
+                msg_sender_id = latest_msg.sender_id
+                msg_sender_acc = account_by_id(msg_sender_id)
+                sender_label = msg_sender_acc.label if msg_sender_acc else str(msg_sender_id)
 
-                other_accounts = [a for a in participants if a.me_id != sender_id]
+                print(f"[DEBUG] [{group_state.title}] Ответ на сообщение от {sender_label}: {msg_text!r}")
+
+                other_accounts = [a for a in participants if a.me_id != msg_sender_id]
                 if not other_accounts:
                     return
 
-                target_account: Optional[Account] = None
-                should_reply_as_mention = False
-
-                if latest_msg.is_reply:
-                    try:
-                        replied = await latest_msg.get_reply_message()
-                    except Exception as e:
-                        replied = None
-                    if replied:
-                        target_account = next(
-                            (a for a in other_accounts if a.me_id == replied.sender_id), None
-                        )
-                        if target_account is not None:
-                            should_reply_as_mention = True
-
-                if target_account is None:
-                    try:
-                        addressee = await detect_addressee(text)
-                    except Exception:
-                        addressee = None
-
-                    if addressee is not None:
-                        matched = _find_addressed_account(addressee, other_accounts)
-                        if matched is not None:
-                            target_account = matched
-                            should_reply_as_mention = True
-
-                if target_account is None:
-                    recently_excluded_ids = set(group_state.recent_speakers) | {sender_id}
-                    candidates = [a for a in other_accounts if a.me_id not in recently_excluded_ids]
-                    target_account = random.choice(candidates or other_accounts)
-                    should_reply_as_mention = False
+                recently_excluded = set(group_state.recent_speakers) | {msg_sender_id}
+                candidates = [a for a in other_accounts if a.me_id not in recently_excluded]
+                target_account = random.choice(candidates or other_accounts)
 
                 try:
                     context = await collect_context(latest_msg, limit=10)
-                    context_trigger = context["trigger"]
-                    context_history = context["messages"]
-
                     theme = load_theme()
 
                     llm_task = asyncio.create_task(
                         ask_llm(
-                            context_trigger,
-                            context_history,
+                            context["trigger"],
+                            context["messages"],
                             group_state.prompt,
                             target_account.first_name,
                             target_account.last_name,
@@ -407,24 +434,17 @@ async def main():
                     if min_cooldown or max_cooldown:
                         await asyncio.sleep(random.uniform(min_cooldown, max_cooldown))
 
-                    async with target_account.client.action(event.chat_id, 'typing'):  # type: ignore
+                    async with target_account.client.action(event.chat_id, 'typing'):
                         reply_text = await llm_task
                         typing_time = min(max(len(reply_text) * 0.05, 1.5), 8)
                         await asyncio.sleep(typing_time)
 
-                    if should_reply_as_mention:
-                        sent_msg = await target_account.client.send_message(
-                            event.chat_id, reply_text, reply_to=latest_msg.id
-                        )
-                        kind = "REPLY"
-                    else:
-                        sent_msg = await target_account.client.send_message(event.chat_id, reply_text)
-                        kind = "TEXT"
+                    sent_msg = await target_account.client.send_message(event.chat_id, reply_text)
 
                     if sent_msg:
                         group_state.last_handled_message_id = sent_msg.id
 
-                    print(f"[{kind}] [{group_state.title}] {target_account.label} -> {text!r} :: {reply_text!r}")
+                    print(f"[TEXT] [{group_state.title}] {target_account.label} :: {reply_text!r}")
 
                     max_recent = max(1, min(2, len(participants) - 1))
                     group_state.recent_speakers.append(target_account.me_id)
